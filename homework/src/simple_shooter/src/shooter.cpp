@@ -23,6 +23,7 @@ cv::Point2f是二维点类，包含成员x、y，表示点的坐标
 cv::Mat是矩阵类，存图像的数据
 cv::cvtColor函数用于颜色空间转换
 cv::inRange函数用于生成黑白掩码
+cv::Vec3b是一个包含三个unsigned char的向量，用于表示HSV颜色空间中的像素值
 cv::findContours函数用于轮廓检测
 cv::boundingRect函数用于计算轮廓的边界矩形，即外接矩形
 cv::norm函数用于计算点之间的直线距离
@@ -35,21 +36,23 @@ struct Kalman
 	double p_xx, p_xv, p_vv;
 	double dt, q, r;
 
-	// 初始化
+	// 初始化(p_xv=p_vx)
+	// p_xx:位置估计方差，p_vv:速度估计方差，p_xv:位置速度协方差
+	// q:过程噪声方差，r:测量噪声方差
 	Kalman(double q_, double r_) : x(0), vx(0), p_xx(100.0), p_xv(0), p_vv(1), dt(0.01), q(q_), r(r_) {}
 
 	void predict(double dt_new)
 	{
 		dt = dt_new;
 		x = x + dt * vx;
-		p_xx = p_xx + 2 * dt * p_xv + dt * dt * p_vv + q;
+		p_xx = p_xx + 2 * dt * p_xv + dt * dt * p_vv + q; // 矩阵展开
 		p_xv = p_xv + dt * p_vv;
 		p_vv = p_vv + q;
 	}
 
-	void update(double z)
+	void update(double z) // z:测量值
 	{
-		double y = z - x;
+		double y = z - x; // 观测残差=测量值-预测值(脑测)
 		double S = p_xx + r;
 		double K_x = p_xx / S;
 		double K_v = p_xv / S;
@@ -111,7 +114,7 @@ private:
 	bool target_present_;
 	std::thread fire_thread_;
 
-	rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_;
+	rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_; // 订阅图像
 
 	int enemy_h_;
 	cv::Rect current_target_rect_;
@@ -120,7 +123,7 @@ private:
 	cv::Point2f prev_target_pos_;
 	rclcpp::Time prev_time_;
 	Kalman kf_x_{kf_q_, kf_r_};
-	bool kf_initialized_ = false;
+	bool kf_launch_ = false;
 	bool have_prev_;
 	float filtered_angle_;
 	bool has_last_target_;
@@ -203,7 +206,7 @@ private:
 		return best_idx;
 	}
 
-	void image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+	void image_callback(const sensor_msgs::msg::Image::SharedPtr msg) // ros2图像消息类型为sensor_msgs::msg::Image
 	{
 		// rqt获取参数
 		stop_fire_distance_ = this->get_parameter("stop_fire_distance").as_double();
@@ -249,7 +252,7 @@ private:
 			have_prev_ = false;
 			has_last_target_ = false;
 			target_present_ = false;
-			kf_initialized_ = false;
+			kf_launch_ = false;
 			return;
 		}
 		else
@@ -310,7 +313,7 @@ private:
 				double delta_time = (now - lock_start_time_).seconds();
 				if (delta_time >= lock_duration_) // 避免长时间锁定同意目标
 				{
-					int next_idx = (match_idx + 1) % enemy_candidates.size();
+					int next_idx = (match_idx + 1) % enemy_candidates.size(); // 防止溢出
 					selected_rect = enemy_candidates[next_idx];
 					lock_start_time_ = now;
 					current_target_rect_ = selected_rect;
@@ -338,19 +341,19 @@ private:
 
 		cv::Point2f target_pos(selected_rect.x + selected_rect.width / 2.0, selected_rect.y + selected_rect.height / 2.0);
 
-		double dt = 0.0;
+		double dt = 0.0; // 卡尔曼预测步长
 		if (have_prev_)
 		{
 			dt = (rclcpp::Time(msg->header.stamp) - prev_time_).seconds();
 		}
 		if (dt <= 0.001)
 			dt = 0.01; // 保护
-
-		if (!kf_initialized_)
+		if (!kf_launch_)
 		{
+			// 初始化卡尔曼参数
 			kf_x_.x = target_pos.x;
 			kf_x_.vx = 0.0;
-			kf_initialized_ = true;
+			kf_launch_ = true;
 		}
 		else
 		{
@@ -358,7 +361,6 @@ private:
 			kf_x_.update(target_pos.x);
 		}
 
-		// 滤波后的位置与速度（仅 x 方向）
 		cv::Point2f filtered_pos(kf_x_.x, target_pos.y);
 		cv::Point2f filtered_vel(kf_x_.vx, 0.0f);
 
